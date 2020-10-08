@@ -101,114 +101,62 @@ wp_oembed_add_provider(
 );
 
 /**
- * Add auth token required by Instagram's oEmbed REST API.
+ * Add auth token required by Instagram's oEmbed REST API, or proxy through WP.com.
  *
  * @since 9.1.0
  *
  * @param string $provider URL of the oEmbed provider.
- * @param string $url      URL of the content to be embedded.
- * @param array  $args     arguments, usually passed from a shortcode.
  *
  * @return string
  */
-function jetpack_instagram_oembed_auth_token( $provider, $url, $args ) {
+function jetpack_instagram_oembed_fetch_url( $provider ) {
 	if ( ! wp_startswith( $provider, 'https://graph.facebook.com/v5.0/instagram_oembed/' ) ) {
 		return $provider;
 	}
 
 	$access_token = jetpack_instagram_get_access_token();
 
-	// We handle the case where we _don't_ have an access token in `jetpack_instagram_oembed_result`,
-	// which comes before this filter (and skips it if successful).
-	if ( empty( $access_token ) ) {
-		return $provider;
-	}
-
-	return add_query_arg(
-		array(
-			'access_token' => $access_token,
-		),
-		$provider
-	);
-}
-add_filter( 'oembed_fetch_url', 'jetpack_instagram_oembed_auth_token', 10, 3 );
-
-/**
- * Use WP.com's oEmbed proxy endpoint if we don't have an auth token.
- *
- * We intercept any HTTP requests to Instagram's oEmbed endpoint before they
- * are made. If we don't have the required auth token, we short-circuit the
- * oEmbed logic by making a request to WP.com's oEmbed proxy and returning its
- * response.
- *
- * @since 9.1.0
- *
- * @param null|string $result The UNSANITIZED (and potentially unsafe) HTML that should be used to embed.
- *                            Default null to continue retrieving the result.
- * @param string      $url    The URL to the content that should be attempted to be embedded.
- * @param array       $args   Optional. Arguments, usually passed from a shortcode. Default empty.
- *
- * @todo Rather than making the actual Jetpack->WP.com HTTP request in here, we could consider
- * adding the required authentication headers via the `oembed_remote_get_args` filter (and dropping
- * this filter). Those headers are currently added by `Client::wpcom_json_api_request_as_blog()` and
- * would need extracting into a helper. Furthermore, that function uses the `Client::_wp_remote_request()`
- * helper that automatically retries upon SSL verification header (for JP sites on hosts with misconfigured
- * SSL), which isn't easy to carry over.
- */
-function jetpack_instagram_oembed_result( $result, $url, $args ) {
-	if ( ! preg_match( '#https?://(www\.)?instagr(\.am|am\.com)/(p|tv)/.*#i', $url ) ) {
-		return $result;
-	}
-
-	$access_token = jetpack_instagram_get_access_token();
-
-	// If we _have_ an Instagram oEmbed access token, this has been handled in
-	// `jetpack_instagram_oembed_auth_token`.
 	if ( ! empty( $access_token ) ) {
-		return $result;
+		return add_query_arg(
+			compact( 'access_token' ),
+			$provider
+		);
 	}
 
-	// TODO: Check if $result has an error, clear it.
-
-	// Check if we're JP and connected; if yes, try WP.com's proxy endpoint.
+	// If we don't have an access token, we go through the WP.com proxy instead.
+	// To that end, we need to make sure that we're connected to WP.com.
 	if ( ! Jetpack::is_active_and_not_offline_mode() ) {
-		return $result;
+		return $provider;
 	}
 
 	// @TODO Use Core's /oembed/1.0/proxy endpoint on WP.com
 	// (Currently not global but per-site, i.e. /oembed/1.0/sites/1234567/proxy)
 	// and deprecate /oembed-proxy/instagram endpoint.
-	$response      = Client::wpcom_json_api_request_as_blog(
-		add_query_arg(
-			array( 'url' => $url ),
-			'/oembed-proxy/instagram'
-		),
-		'2',
-		array(),
-		null,
-		'wpcom'
-	);
-	$response_body = json_decode( wp_remote_retrieve_body( $response ) );
+	$wpcom_oembed_proxy = Constants::get_constant( 'JETPACK__WPCOM_JSON_API_BASE' ) . '/wpcom/v2/oembed-proxy/instagram/';
+	return str_replace( 'https://graph.facebook.com/v5.0/instagram_oembed/', $wpcom_oembed_proxy, $provider );
+}
+add_filter( 'oembed_fetch_url', 'jetpack_instagram_oembed_fetch_url', 10, 1 );
 
-	if (
-		is_wp_error( $response )
-		|| 200 !== wp_remote_retrieve_response_code( $response )
-		|| empty( $response_body )
-	) {
-		return $result;
+
+/**
+ * Add JP auth headers if we're proxying through WP.com.
+ *
+ * @param array  $args oEmbed remote get arguments.
+ * @param string $url  URL to be inspected.
+ */
+function jetpack_instagram_oembed_remote_get_args( $args, $url ) {
+	if ( ! wp_startswith( $url, Constants::get_constant( 'JETPACK__WPCOM_JSON_API_BASE' ) . '/wpcom/v2/oembed-proxy/instagram/' ) ) {
+		return $args;
 	}
 
-	return $response_body->html;
+	$method         = 'GET';
+	$signed_request = Client::build_signed_request(
+		compact( 'url', 'method' )
+	);
 
+	return $signed_request['request'];
 }
-// A potential alternative would be to hook into `pre_oembed_result`,
-// as that would require fewer checks in `jetpack_instagram_oembed_result`.
-// However, `pre_oembed_result` is not applied by the oEmbed REST API
-// controller (see https://core.trac.wordpress.org/ticket/51471) which
-// would break the `/oembed/1.0/proxy` endpoint that is used by Gutenberg's
-// embed block.
-add_filter( 'oembed_result', 'jetpack_instagram_oembed_result', 10, 3 );
-
+add_filter( 'oembed_remote_get_args', 'jetpack_instagram_oembed_remote_get_args', 10, 2 );
 
 /**
  * Fetches a Facebook API access token used for query for Instagram embed information, if one is set.
