@@ -23,6 +23,23 @@ class Client {
 	 * @return array|WP_Error WP HTTP response on success
 	 */
 	public static function remote_request( $args, $body = null ) {
+		$result = self::build_signed_request( $args, $body );
+		return self::_wp_remote_request( $result['url'], $result['request'] );
+	}
+
+	/**
+	 * Makes an authorized remote request using Jetpack_Signature
+	 *
+	 * @param array        $args the arguments for the remote request.
+	 * @param array|String $body the request body.
+	 * @return array {
+	 *     An array containing URL and request items.
+	 *
+	 *     @type String $url     The request URL.
+	 *     @type array  $request Request arguments.
+	 * }
+	 */
+	public static function build_signed_request( $args, $body = null ) {
 		Utils::init_default_constants();
 
 		$defaults = array(
@@ -158,7 +175,7 @@ class Client {
 			$url = add_query_arg( 'signature', rawurlencode( $signature ), $url );
 		}
 
-		return self::_wp_remote_request( $url, $request );
+		return compact( 'url', 'request' );
 	}
 
 	/**
